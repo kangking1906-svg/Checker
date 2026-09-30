@@ -1,133 +1,221 @@
-const state = {
-  length: 2,
-  filter: "all",
-  rows: []
-};
+const state={length:2,running:false,checked:0,available:[]};
 
-const els = {
-  results: document.getElementById("results"),
-  amount: document.getElementById("amount"),
-  charset: document.getElementById("charset"),
-  search: document.getElementById("search"),
-  total: document.getElementById("total"),
-  available: document.getElementById("available"),
-  unknown: document.getElementById("unknown"),
-  toast: document.getElementById("toast")
-};
+const startButton=document.getElementById("start");
+const stopButton=document.getElementById("stop");
+const results=document.getElementById("results");
+const checkedText=document.getElementById("checked");
+const availableText=document.getElementById("available");
+const statusText=document.getElementById("statusText");
+const charset=document.getElementById("charset");
+const delayInput=document.getElementById("delay");
+const goal=document.getElementById("goal");
+const toastBox=document.getElementById("toast");
+const usedUsernames=new Set();
 
-document.querySelectorAll(".length").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".length").forEach(x => x.classList.remove("active"));
-    btn.classList.add("active");
-    state.length = Number(btn.dataset.length);
+document.querySelectorAll(".length").forEach(button=>{
+  button.addEventListener("click",()=>{
+    document.querySelectorAll(".length").forEach(x=>x.classList.remove("active"));
+    button.classList.add("active");
+    state.length=Number(button.dataset.length);
   });
 });
 
-document.querySelectorAll(".filter").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".filter").forEach(x => x.classList.remove("active"));
-    btn.classList.add("active");
-    state.filter = btn.dataset.filter;
-    render();
-  });
-});
+startButton.addEventListener("click",startFinding);
+stopButton.addEventListener("click",stopFinding);
 
-document.getElementById("generate").addEventListener("click", generate);
-document.getElementById("clear").addEventListener("click", () => {
-  state.rows = [];
-  render();
-});
-document.getElementById("copyAvailable").addEventListener("click", async () => {
-  const names = state.rows.filter(r => r.status === "available").map(r => r.username);
-  if (!names.length) return toast("No verified available usernames.");
-  await navigator.clipboard.writeText(names.join("\n"));
-  toast(`${names.length} usernames copied!`);
-});
-els.search.addEventListener("input", render);
+async function startFinding(){
+  if(state.running)return;
 
-function randomName(length, chars) {
-  let result = "";
-  for (let i = 0; i < length; i++) result += chars[Math.floor(Math.random() * chars.length)];
-  return result;
+  state.running=true;
+  state.checked=0;
+  state.available=[];
+  usedUsernames.clear();
+
+  renderResults();
+  startButton.disabled=true;
+  stopButton.disabled=false;
+  statusText.textContent="Searching...";
+
+  const target=getGoal();
+
+  while(state.running && state.available.length<target){
+    const username=generateUniqueUsername();
+
+    if(!username){
+      statusText.textContent="No more usernames available";
+      break;
+    }
+
+    state.checked++;
+    updateStats();
+    statusText.textContent=`Checking ${username}...`;
+
+    try{
+      const result=await verifyUsername(username);
+
+      if(result==="available"&&state.running){
+        state.available.push(username);
+        renderResults();
+        showToast(`Found available username: ${username}`);
+      }
+    }catch(error){
+      console.error("Availability check failed:",error);
+      statusText.textContent="API error";
+    }
+
+    updateStats();
+
+    if(state.running)await sleep(getDelay());
+  }
+
+  if(state.running){
+    statusText.textContent=state.available.length>=target?"Found!":"Finished";
+  }else{
+    statusText.textContent="Stopped";
+  }
+
+  state.running=false;
+  startButton.disabled=false;
+  stopButton.disabled=true;
+}
+
+function stopFinding(){
+  state.running=false;
+  statusText.textContent="Stopping...";
+}
+
+function generateUniqueUsername(){
+  let characters;
+
+  if(charset.value==="numbers"){
+    characters="0123456789";
+  }else if(charset.value==="lettersNumbers"){
+    characters="abcdefghijklmnopqrstuvwxyz0123456789";
+  }else{
+    characters="abcdefghijklmnopqrstuvwxyz";
+  }
+
+  for(let attempt=0;attempt<1000;attempt++){
+    let username="";
+
+    for(let i=0;i<state.length;i++){
+      username+=characters[Math.floor(Math.random()*characters.length)];
+    }
+
+    if(!usedUsernames.has(username)){
+      usedUsernames.add(username);
+      return username;
+    }
+  }
+
+  return null;
 }
 
 /*
-  This demo intentionally does NOT pretend that a username is available.
-  To connect a real platform, replace verifyUsername() with the platform's
-  official API call from your server/backend.
+  Connect this to your backend.
+
+  The backend should return JSON like:
+  { "available": true }
+
+  or:
+  { "available": false }
+
+  Do not put private API keys in this file.
 */
-async function verifyUsername(username) {
-  return "unknown";
-}
+async function verifyUsername(username){
+  const response=await fetch(
+    `/api/check?username=${encodeURIComponent(username)}`,
+    {
+      method:"GET",
+      headers:{"Accept":"application/json"}
+    }
+  );
 
-async function generate() {
-  const amount = Math.min(500, Math.max(1, Number(els.amount.value) || 50));
-  const type = els.charset.value;
-  const chars = type === "numbers" ? "0123456789" :
-                type === "lettersNumbers" ? "abcdefghijklmnopqrstuvwxyz0123456789" :
-                "abcdefghijklmnopqrstuvwxyz";
-
-  const set = new Set();
-  while (set.size < amount) set.add(randomName(state.length, chars));
-
-  state.rows = [...set].map(username => ({ username, status: "unknown" }));
-  render();
-
-  // Verify through a legitimate backend/API when configured.
-  for (let i = 0; i < state.rows.length; i++) {
-    state.rows[i].status = await verifyUsername(state.rows[i].username);
-    render();
+  if(!response.ok){
+    throw new Error(`HTTP ${response.status}`);
   }
+
+  const data=await response.json();
+
+  return data.available===true?"available":"taken";
 }
 
-function render() {
-  const query = els.search.value.trim().toLowerCase();
-  let rows = state.rows.filter(r => r.username.toLowerCase().includes(query));
-  if (state.filter !== "all") rows = rows.filter(r => r.status === state.filter);
-
-  els.total.textContent = state.rows.length;
-  els.available.textContent = state.rows.filter(r => r.status === "available").length;
-  els.unknown.textContent = state.rows.filter(r => r.status === "unknown").length;
-
-  if (!rows.length) {
-    els.results.innerHTML = `<div class="empty"><div class="empty-icon">⌁</div><h3>No results</h3><p>Generate usernames or change your filters.</p></div>`;
+function renderResults(){
+  if(!state.available.length){
+    results.innerHTML=`
+      <div class="empty">
+        <div class="empty-icon">⌁</div>
+        <h3>No available usernames found</h3>
+        <p>The checker will keep searching until it finds one.</p>
+      </div>`;
     return;
   }
 
-  els.results.innerHTML = rows.map((r, index) => `
+  results.innerHTML=state.available.map(username=>`
     <div class="row">
-      <div class="username">${escapeHtml(r.username)}</div>
-      <div class="length">${r.username.length} chars</div>
+      <div class="username">${escapeHTML(username)}</div>
+      <div>${username.length} characters</div>
       <div>
-        <span class="status ${r.status}">
-          ${r.status === "available" ? "✓ Available" : "⚠ Unable to verify"}
-        </span>
+        <span class="available-status">✓ Available</span>
       </div>
-      <div><button class="copy" data-copy="${escapeAttr(r.username)}">Copy</button></div>
+      <button class="copy" data-copy="${escapeHTML(username)}">Copy</button>
     </div>
   `).join("");
 
-  document.querySelectorAll(".copy").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(btn.dataset.copy);
-      const old = btn.textContent;
-      btn.textContent = "Copied!";
-      toast("Username copied.");
-      setTimeout(() => btn.textContent = old, 900);
+  document.querySelectorAll(".copy").forEach(button=>{
+    button.addEventListener("click",async()=>{
+      await navigator.clipboard.writeText(button.dataset.copy);
+      const old=button.textContent;
+      button.textContent="Copied!";
+      showToast("Username copied.");
+      setTimeout(()=>button.textContent=old,900);
     });
   });
 }
 
-function toast(message) {
-  els.toast.textContent = message;
-  els.toast.classList.add("show");
-  clearTimeout(window.__toastTimer);
-  window.__toastTimer = setTimeout(() => els.toast.classList.remove("show"), 1600);
+document.getElementById("copyAll").addEventListener("click",async()=>{
+  if(!state.available.length){
+    showToast("No available usernames yet.");
+    return;
+  }
+
+  await navigator.clipboard.writeText(state.available.join("
+"));
+  showToast(`${state.available.length} usernames copied!`);
+});
+
+function updateStats(){
+  checkedText.textContent=state.checked;
+  availableText.textContent=state.available.length;
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[c]));
+function getGoal(){
+  if(goal.value==="five")return 5;
+  if(goal.value==="ten")return 10;
+  return 1;
 }
-function escapeAttr(s) { return escapeHtml(s); }
 
-render();
+function getDelay(){
+  const value=Number(delayInput.value);
+  return Math.min(10000,Math.max(500,value||1500));
+}
+
+function sleep(milliseconds){
+  return new Promise(resolve=>setTimeout(resolve,milliseconds));
+}
+
+function showToast(message){
+  toastBox.textContent=message;
+  toastBox.classList.add("show");
+  clearTimeout(window.toastTimer);
+  window.toastTimer=setTimeout(()=>toastBox.classList.remove("show"),1800);
+}
+
+function escapeHTML(text){
+  return text.replace(/[&<>"']/g,character=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+  }[character]));
+}
+
+renderResults();
+updateStats();
